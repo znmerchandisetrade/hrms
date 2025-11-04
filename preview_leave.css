@@ -1,0 +1,570 @@
+<?php
+session_start();
+require_once 'config/Database.php';
+require_once 'models/LeaveApplication.php';
+
+// Check if user is logged in
+if (!isset($_SESSION['user_id'])) {
+    header("Location: index.php");
+    exit();
+}
+
+// Get leave ID from query parameter
+$leave_id = $_GET['id'] ?? 0;
+
+if (!$leave_id) {
+    die('<div style="padding: 20px; text-align: center; font-family: Arial;">Invalid leave application ID</div>');
+}
+
+$database = new Database();
+$db = $database->getConnection();
+
+$leaveApp = new LeaveApplication($db);
+
+// Get leave details with user information
+$query = "SELECT la.*, u.full_name, u.company_id, u.department_id, u.profile_image,
+                 c.company_name, d.department_name,
+                 approver.full_name as approved_by_name,
+                 approver_role.role_name as approved_by_role,
+                 la.created_at as applied_date,
+                 lh.created_at as processed_date,
+                 lh.manager_notes
+          FROM leave_applications la 
+          LEFT JOIN users u ON la.user_id = u.id
+          LEFT JOIN companies c ON u.company_id = c.id
+          LEFT JOIN departments d ON u.department_id = d.id
+          LEFT JOIN leave_history lh ON la.id = lh.leave_application_id
+          LEFT JOIN users approver ON lh.approved_by = approver.id
+          LEFT JOIN roles approver_role ON approver.role_id = approver_role.id
+          WHERE la.id = :id 
+          LIMIT 1";
+
+$stmt = $db->prepare($query);
+$stmt->bindParam(":id", $leave_id);
+$stmt->execute();
+$leave = $stmt->fetch(PDO::FETCH_ASSOC);
+
+if (!$leave) {
+    die('<div style="padding: 20px; text-align: center; font-family: Arial;">Leave application not found</div>');
+}
+
+// Only allow preview for approved/rejected leaves
+if ($leave['status'] === 'pending') {
+    die('<div style="padding: 20px; text-align: center; font-family: Arial;">Cannot preview pending leave applications</div>');
+}
+
+// Format dates
+$start_date = date('F j, Y', strtotime($leave['start_date']));
+$end_date = date('F j, Y', strtotime($leave['end_date']));
+$applied_date = date('F j, Y', strtotime($leave['applied_date']));
+$processed_date = date('F j, Y g:i A', strtotime($leave['processed_date'] ?? $leave['applied_date']));
+$current_date = date('F j, Y g:i A');
+
+// Determine status color and text
+$status_color = $leave['status'] == 'approved' ? '#28a745' : '#dc3545';
+$status_text = $leave['status'] == 'approved' ? 'APPROVED' : 'REJECTED';
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Leave Application - <?php echo htmlspecialchars($leave['full_name']); ?></title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        @media print {
+            @page {
+                size: A5;
+                margin: 10mm;
+            }
+            body {
+                font-size: 10pt;
+                margin: 0;
+                padding: 0;
+            }
+            .no-print {
+                display: none !important;
+            }
+            .container {
+                max-width: 100% !important;
+                margin: 0 !important;
+                padding: 0 !important;
+            }
+            .watermark {
+                display: block !important;
+            }
+        }
+
+        @media screen {
+            body {
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                padding: 20px;
+                min-height: 100vh;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+            }
+            .container {
+                background: white;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+                border-radius: 10px;
+            }
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-size: 11pt;
+            line-height: 1.4;
+            color: #000;
+            margin: 0;
+            padding: 0;
+        }
+
+        .container {
+            max-width: 148mm;
+            margin: 0 auto;
+            padding: 15mm;
+            background: white;
+            position: relative;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 15pt;
+            border-bottom: 2pt solid #2c5aa0;
+            padding-bottom: 8pt;
+        }
+
+        .company-name {
+            font-size: 16pt;
+            font-weight: bold;
+            margin-bottom: 3pt;
+            color: #2c5aa0;
+            text-transform: uppercase;
+        }
+
+        .form-title {
+            font-size: 14pt;
+            font-weight: bold;
+            margin-bottom: 5pt;
+            color: #333;
+        }
+
+        .section {
+            margin-bottom: 12pt;
+            page-break-inside: avoid;
+        }
+
+        .section-title {
+            font-weight: bold;
+            background: linear-gradient(135deg, #2c5aa0, #3a6bc0);
+            color: white;
+            padding: 6pt 10pt;
+            margin-bottom: 8pt;
+            font-size: 10pt;
+            text-transform: uppercase;
+            border-radius: 3pt;
+        }
+
+        .info-grid {
+            display: table;
+            width: 100%;
+            margin-bottom: 8pt;
+        }
+
+        .info-row {
+            display: table-row;
+        }
+
+        .info-label {
+            display: table-cell;
+            font-weight: bold;
+            color: #555;
+            padding: 3pt 0;
+            width: 35%;
+            vertical-align: top;
+            border-bottom: 1pt dotted #eee;
+        }
+
+        .info-value {
+            display: table-cell;
+            padding: 3pt 0;
+            vertical-align: top;
+            border-bottom: 1pt dotted #eee;
+        }
+
+        .leave-details {
+            border: 1.5pt solid #e9ecef;
+            padding: 10pt;
+            border-radius: 5pt;
+            background: #f8f9fa;
+        }
+
+        .signature-section {
+            margin-top: 25pt;
+        }
+
+        .signature-line {
+            border-top: 1pt solid #000;
+            margin-top: 25pt;
+            width: 80%;
+        }
+
+        .signature-label {
+            text-align: center;
+            font-size: 9pt;
+            margin-top: 3pt;
+            color: #666;
+        }
+
+        .status-badge {
+            padding: 4pt 8pt;
+            border-radius: 3pt;
+            font-weight: bold;
+            font-size: 9pt;
+            display: inline-block;
+            text-transform: uppercase;
+        }
+
+        .status-approved {
+            background: linear-gradient(135deg, #d4edda, #c3e6cb);
+            color: #155724;
+            border: 1pt solid #28a745;
+        }
+
+        .status-rejected {
+            background: linear-gradient(135deg, #f8d7da, #f5c6cb);
+            color: #721c24;
+            border: 1pt solid #dc3545;
+        }
+
+        .notes-box {
+            border: 1pt solid #dee2e6;
+            padding: 8pt;
+            background: white;
+            border-radius: 3pt;
+            min-height: 40pt;
+            font-size: 10pt;
+        }
+
+        .footer {
+            text-align: center;
+            margin-top: 20pt;
+            font-size: 8pt;
+            color: #666;
+            border-top: 1pt solid #dee2e6;
+            padding-top: 8pt;
+        }
+
+        .print-date {
+            text-align: right;
+            font-size: 8pt;
+            color: #666;
+            margin-bottom: 8pt;
+        }
+
+        .reason-box {
+            border: 1pt dashed #adb5bd;
+            padding: 8pt;
+            margin-top: 4pt;
+            background: white;
+            border-radius: 3pt;
+            font-size: 10pt;
+            line-height: 1.5;
+        }
+
+        .watermark {
+            position: fixed;
+            bottom: 30mm;
+            right: 15mm;
+            opacity: 0.03;
+            font-size: 60pt;
+            font-weight: bold;
+            transform: rotate(-45deg);
+            pointer-events: none;
+            color: #2c5aa0;
+            display: none;
+        }
+
+        .grid-2col {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10pt;
+            margin-bottom: 10pt;
+        }
+
+        .control-panel {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+            z-index: 1000;
+            border: 2px solid #2c5aa0;
+        }
+
+        .control-panel h4 {
+            margin: 0 0 10px 0;
+            color: #2c5aa0;
+            font-size: 14px;
+            text-align: center;
+        }
+
+        .btn {
+            padding: 8px 15px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: bold;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            margin: 2px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #007bff, #0056b3);
+            color: white;
+        }
+
+        .btn-success {
+            background: linear-gradient(135deg, #28a745, #1e7e34);
+            color: white;
+        }
+
+        .btn-secondary {
+            background: linear-gradient(135deg, #6c757d, #545b62);
+            color: white;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+
+        .btn i {
+            margin-right: 5px;
+        }
+
+        .document-id {
+            background: #f8f9fa;
+            padding: 5px 10px;
+            border-radius: 3px;
+            font-family: monospace;
+            font-size: 10px;
+            border: 1px solid #dee2e6;
+        }
+
+        .alert-info {
+            background: #d1ecf1;
+            border: 1px solid #bee5eb;
+            color: #0c5460;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 10pt;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="watermark"><?php echo $status_text; ?></div>
+    
+    <!-- Control Panel -->
+    <div class="control-panel no-print">
+        <h4><i class="fas fa-print"></i> Print Controls</h4>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 5px;">
+            <button class="btn btn-success" onclick="window.print()">
+                <i class="fas fa-print"></i> Print
+            </button>
+            <button class="btn btn-primary" onclick="downloadPDF()">
+                <i class="fas fa-download"></i> PDF
+            </button>
+            <button class="btn btn-secondary" onclick="window.close()">
+                <i class="fas fa-times"></i> Close
+            </button>
+        </div>
+        <div style="margin-top: 10px; text-align: center;">
+            <div class="document-id">DOC: LA-<?php echo str_pad($leave_id, 6, '0', STR_PAD_LEFT); ?></div>
+            <div style="font-size: 10px; color: #666; margin-top: 5px;">
+                A5 Format Ready
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="print-date">
+            Generated on: <?php echo $current_date; ?>
+        </div>
+
+        <div class="header">
+            <div class="company-name"><?php echo htmlspecialchars($leave['company_name'] ?? 'LEAVE MANAGEMENT SYSTEM'); ?></div>
+            <div class="form-title">OFFICIAL LEAVE APPLICATION FORM</div>
+        </div>
+
+        <div class="alert-info">
+            <i class="fas fa-info-circle"></i> This document is optimized for A5 paper printing. Use the print controls above.
+        </div>
+
+        <div class="section">
+            <div class="section-title">Employee Information</div>
+            <div class="info-grid">
+                <div class="info-row">
+                    <div class="info-label">Full Name:</div>
+                    <div class="info-value"><strong><?php echo htmlspecialchars($leave['full_name']); ?></strong></div>
+                </div>
+                <div class="info-row">
+                    <div class="info-label">Department:</div>
+                    <div class="info-value"><?php echo htmlspecialchars($leave['department_name'] ?? 'Not specified'); ?></div>
+                </div>
+                <div class="info-row">
+                    <div class="info-label">Store/Brand:</div>
+                    <div class="info-value"><?php echo htmlspecialchars($leave['store_brand']); ?></div>
+                </div>
+                <div class="info-row">
+                    <div class="info-label">Date Applied:</div>
+                    <div class="info-value"><?php echo $applied_date; ?></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">Leave Details</div>
+            <div class="leave-details">
+                <div class="grid-2col">
+                    <div>
+                        <div class="info-label">Start Date:</div>
+                        <div class="info-value"><strong><?php echo $start_date; ?></strong></div>
+                    </div>
+                    <div>
+                        <div class="info-label">End Date:</div>
+                        <div class="info-value"><strong><?php echo $end_date; ?></strong></div>
+                    </div>
+                    <div>
+                        <div class="info-label">Number of Days:</div>
+                        <div class="info-value"><strong><?php echo $leave['day_off_count']; ?> day(s)</strong></div>
+                    </div>
+                    <div>
+                        <div class="info-label">Status:</div>
+                        <div class="info-value">
+                            <span class="status-badge <?php echo $leave['status'] == 'approved' ? 'status-approved' : 'status-rejected'; ?>">
+                                <?php echo strtoupper($leave['status']); ?>
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div style="margin-top: 10pt;">
+                    <div class="info-label">Reason for Leave:</div>
+                    <div class="reason-box"><?php echo nl2br(htmlspecialchars($leave['reason'])); ?></div>
+                </div>
+                
+                <div style="margin-top: 10pt;">
+                    <div class="info-label">Reliever Assigned:</div>
+                    <div class="info-value"><strong><?php echo htmlspecialchars($leave['reliever_name']); ?></strong></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">Approval Details</div>
+            <div class="grid-2col">
+                <div>
+                    <div class="info-label">Approved By:</div>
+                    <div class="info-value"><strong><?php echo htmlspecialchars($leave['approved_by_name'] ?? 'System'); ?></strong></div>
+                </div>
+                <div>
+                    <div class="info-label">Position:</div>
+                    <div class="info-value"><?php echo htmlspecialchars($leave['approved_by_role'] ?? 'Manager'); ?></div>
+                </div>
+                <div>
+                    <div class="info-label">Date Processed:</div>
+                    <div class="info-value"><?php echo $processed_date; ?></div>
+                </div>
+            </div>
+            
+            <div style="margin-top: 10pt;">
+                <div class="info-label">Manager's Comments:</div>
+                <div class="notes-box">
+                    <?php echo !empty($leave['manager_notes']) ? nl2br(htmlspecialchars($leave['manager_notes'])) : 'No additional comments provided.'; ?>
+                </div>
+            </div>
+        </div>
+
+        <div class="section signature-section">
+            <div class="grid-2col">
+                <div style="text-align: center;">
+                    <div class="signature-line"></div>
+                    <div class="signature-label">
+                        Employee's Signature<br>
+                        <em>Date: _______________</em>
+                    </div>
+                </div>
+                <div style="text-align: center;">
+                    <div class="signature-line"></div>
+                    <div class="signature-label">
+                        Manager's Signature<br>
+                        <em>Date: _______________</em>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer">
+            <strong>OFFICIAL DOCUMENT</strong> - This leave application has been <?php echo strtoupper($leave['status']); ?>.<br>
+            Document ID: LA-<?php echo str_pad($leave_id, 6, '0', STR_PAD_LEFT); ?> | <?php echo htmlspecialchars($leave['company_name'] ?? 'Leave Management System'); ?><br>
+            <em>This is a computer-generated document. No physical signature is required.</em>
+        </div>
+    </div>
+
+    <script>
+        // PDF Download function (placeholder - would need server-side PDF generation)
+        function downloadPDF() {
+            alert('PDF download feature would require server-side PDF generation. Currently showing print preview.');
+            window.print();
+        }
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', function(e) {
+            // Ctrl+P or Cmd+P for print
+            if ((e.ctrlKey || e.metaKey) && e.key === 'p') {
+                e.preventDefault();
+                window.print();
+            }
+            // Escape to close
+            if (e.key === 'Escape') {
+                window.close();
+            }
+        });
+
+        // Auto-print if specified in URL
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('print') === 'true') {
+            setTimeout(() => {
+                window.print();
+            }, 1000);
+        }
+
+        // Show watermark on print
+        window.addEventListener('beforeprint', () => {
+            document.querySelector('.watermark').style.display = 'block';
+        });
+
+        window.addEventListener('afterprint', () => {
+            document.querySelector('.watermark').style.display = 'none';
+        });
+
+        // Add some interactive effects
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('Leave Preview Loaded:', {
+                leaveId: <?php echo $leave_id; ?>,
+                status: '<?php echo $leave['status']; ?>',
+                employee: '<?php echo $leave['full_name']; ?>'
+            });
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,382 @@
+<?php
+require_once 'config/Database.php';
+require_once 'models/LeaveApplication.php';
+
+// Get leave ID from POST
+$leave_id = $_POST['leave_id'] ?? 0;
+
+if (!$leave_id) {
+    die('Invalid leave application ID');
+}
+
+$database = new Database();
+$db = $database->getConnection();
+
+$leaveApp = new LeaveApplication($db);
+
+// Get leave details with user information
+$query = "SELECT la.*, u.full_name, u.company_id, u.department_id, u.profile_image,
+                 c.company_name, d.department_name,
+                 approver.full_name as approved_by_name,
+                 approver_role.role_name as approved_by_role,
+                 la.created_at as applied_date,
+                 lh.created_at as processed_date,
+                 lh.manager_notes
+          FROM leave_applications la 
+          LEFT JOIN users u ON la.user_id = u.id
+          LEFT JOIN companies c ON u.company_id = c.id
+          LEFT JOIN departments d ON u.department_id = d.id
+          LEFT JOIN leave_history lh ON la.id = lh.leave_application_id
+          LEFT JOIN users approver ON lh.approved_by = approver.id
+          LEFT JOIN roles approver_role ON approver.role_id = approver_role.id
+          WHERE la.id = :id 
+          LIMIT 1";
+
+$stmt = $db->prepare($query);
+$stmt->bindParam(":id", $leave_id);
+$stmt->execute();
+$leave = $stmt->fetch(PDO::FETCH_ASSOC);
+
+if (!$leave) {
+    die('Leave application not found');
+}
+
+// Only allow PDF generation for approved/rejected leaves
+if ($leave['status'] === 'pending') {
+    die('Cannot generate PDF for pending leave applications');
+}
+
+// Format dates
+$start_date = date('F j, Y', strtotime($leave['start_date']));
+$end_date = date('F j, Y', strtotime($leave['end_date']));
+$applied_date = date('F j, Y', strtotime($leave['applied_date']));
+$processed_date = date('F j, Y g:i A', strtotime($leave['processed_date'] ?? $leave['applied_date']));
+
+// Generate HTML for PDF
+$html = '
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Leave Application Form - ' . htmlspecialchars($leave['full_name']) . '</title>
+    <style>
+        @page {
+            size: A5;
+            margin: 10mm;
+        }
+        body {
+            font-family: "DejaVu Sans", "Arial", sans-serif;
+            font-size: 10pt;
+            line-height: 1.3;
+            color: #000;
+            margin: 0;
+            padding: 0;
+        }
+        .container {
+            max-width: 100%;
+            margin: 0 auto;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 15pt;
+            border-bottom: 1.5pt solid #000;
+            padding-bottom: 8pt;
+        }
+        .company-name {
+            font-size: 14pt;
+            font-weight: bold;
+            margin-bottom: 3pt;
+            text-transform: uppercase;
+        }
+        .form-title {
+            font-size: 12pt;
+            font-weight: bold;
+            margin-bottom: 5pt;
+        }
+        .section {
+            margin-bottom: 12pt;
+            page-break-inside: avoid;
+        }
+        .section-title {
+            font-weight: bold;
+            background-color: #f5f5f5;
+            padding: 4pt 8pt;
+            border-left: 3pt solid #2c5aa0;
+            margin-bottom: 6pt;
+            font-size: 9pt;
+            text-transform: uppercase;
+        }
+        .info-grid {
+            display: table;
+            width: 100%;
+            margin-bottom: 8pt;
+        }
+        .info-row {
+            display: table-row;
+        }
+        .info-label {
+            display: table-cell;
+            font-weight: bold;
+            color: #333;
+            padding: 2pt 0;
+            width: 35%;
+            vertical-align: top;
+        }
+        .info-value {
+            display: table-cell;
+            padding: 2pt 0;
+            vertical-align: top;
+        }
+        .leave-details {
+            border: 1pt solid #ddd;
+            padding: 8pt;
+            border-radius: 3pt;
+            background-color: #fafafa;
+        }
+        .signature-section {
+            margin-top: 25pt;
+        }
+        .signature-line {
+            border-top: 1pt solid #000;
+            margin-top: 25pt;
+            width: 80%;
+        }
+        .signature-label {
+            text-align: center;
+            font-size: 8pt;
+            margin-top: 2pt;
+        }
+        .status-badge {
+            padding: 2pt 6pt;
+            border-radius: 2pt;
+            font-weight: bold;
+            font-size: 8pt;
+            display: inline-block;
+        }
+        .status-approved {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1pt solid #c3e6cb;
+        }
+        .status-rejected {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1pt solid #f5c6cb;
+        }
+        .notes-box {
+            border: 1pt solid #ddd;
+            padding: 6pt;
+            background-color: #fff;
+            border-radius: 2pt;
+            min-height: 40pt;
+            font-size: 9pt;
+        }
+        .footer {
+            text-align: center;
+            margin-top: 20pt;
+            font-size: 7pt;
+            color: #666;
+            border-top: 0.5pt solid #ddd;
+            padding-top: 5pt;
+        }
+        .print-date {
+            text-align: right;
+            font-size: 7pt;
+            color: #666;
+            margin-bottom: 5pt;
+        }
+        .reason-box {
+            border: 1pt dashed #999;
+            padding: 6pt;
+            margin-top: 3pt;
+            background-color: #fff;
+            border-radius: 2pt;
+            font-size: 9pt;
+        }
+        .watermark {
+            position: fixed;
+            bottom: 20mm;
+            right: 10mm;
+            opacity: 0.1;
+            font-size: 40pt;
+            transform: rotate(-45deg);
+            pointer-events: none;
+        }
+        .grid-2col {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8pt;
+            margin-bottom: 8pt;
+        }
+        @media print {
+            .no-print {
+                display: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="watermark">' . ($leave['status'] == 'approved' ? 'APPROVED' : 'REJECTED') . '</div>
+    
+    <div class="print-date">
+        Generated on: ' . date('M j, Y g:i A') . '
+    </div>
+
+    <div class="container">
+        <div class="header">
+            <div class="company-name">' . htmlspecialchars($leave['company_name'] ?? 'LEAVE MANAGEMENT SYSTEM') . '</div>
+            <div class="form-title">OFFICIAL LEAVE APPLICATION FORM</div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">Employee Information</div>
+            <div class="info-grid">
+                <div class="info-row">
+                    <div class="info-label">Full Name:</div>
+                    <div class="info-value"><strong>' . htmlspecialchars($leave['full_name']) . '</strong></div>
+                </div>
+                <div class="info-row">
+                    <div class="info-label">Department:</div>
+                    <div class="info-value">' . htmlspecialchars($leave['department_name'] ?? 'Not specified') . '</div>
+                </div>
+                <div class="info-row">
+                    <div class="info-label">Store/Brand:</div>
+                    <div class="info-value">' . htmlspecialchars($leave['store_brand']) . '</div>
+                </div>
+                <div class="info-row">
+                    <div class="info-label">Date Applied:</div>
+                    <div class="info-value">' . $applied_date . '</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">Leave Details</div>
+            <div class="leave-details">
+                <div class="grid-2col">
+                    <div>
+                        <div class="info-label">Start Date:</div>
+                        <div class="info-value"><strong>' . $start_date . '</strong></div>
+                    </div>
+                    <div>
+                        <div class="info-label">End Date:</div>
+                        <div class="info-value"><strong>' . $end_date . '</strong></div>
+                    </div>
+                    <div>
+                        <div class="info-label">Number of Days:</div>
+                        <div class="info-value"><strong>' . $leave['day_off_count'] . ' day(s)</strong></div>
+                    </div>
+                    <div>
+                        <div class="info-label">Status:</div>
+                        <div class="info-value">
+                            <span class="status-badge ' . ($leave['status'] == 'approved' ? 'status-approved' : 'status-rejected') . '">
+                                ' . strtoupper($leave['status']) . '
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div style="margin-top: 8pt;">
+                    <div class="info-label">Reason for Leave:</div>
+                    <div class="reason-box">' . nl2br(htmlspecialchars($leave['reason'])) . '</div>
+                </div>
+                
+                <div style="margin-top: 8pt;">
+                    <div class="info-label">Reliever Assigned:</div>
+                    <div class="info-value"><strong>' . htmlspecialchars($leave['reliever_name']) . '</strong></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">Approval Details</div>
+            <div class="grid-2col">
+                <div>
+                    <div class="info-label">Approved By:</div>
+                    <div class="info-value"><strong>' . htmlspecialchars($leave['approved_by_name'] ?? 'System') . '</strong></div>
+                </div>
+                <div>
+                    <div class="info-label">Position:</div>
+                    <div class="info-value">' . htmlspecialchars($leave['approved_by_role'] ?? 'Manager') . '</div>
+                </div>
+                <div>
+                    <div class="info-label">Date Processed:</div>
+                    <div class="info-value">' . $processed_date . '</div>
+                </div>
+            </div>
+            
+            <div style="margin-top: 8pt;">
+                <div class="info-label">Manager\'s Comments:</div>
+                <div class="notes-box">
+                    ' . (!empty($leave['manager_notes']) ? nl2br(htmlspecialchars($leave['manager_notes'])) : 'No additional comments provided.') . '
+                </div>
+            </div>
+        </div>
+
+        <div class="section signature-section">
+            <div class="grid-2col">
+                <div style="text-align: center;">
+                    <div class="signature-line"></div>
+                    <div class="signature-label">
+                        Employee\'s Signature<br>
+                        <em>Date: _______________</em>
+                    </div>
+                </div>
+                <div style="text-align: center;">
+                    <div class="signature-line"></div>
+                    <div class="signature-label">
+                        Manager\'s Signature<br>
+                        <em>Date: _______________</em>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer">
+            <strong>OFFICIAL DOCUMENT</strong> - This leave application has been ' . strtoupper($leave['status']) . '.<br>
+            Document ID: LA-' . str_pad($leave_id, 6, '0', STR_PAD_LEFT) . ' | ' . htmlspecialchars($leave['company_name'] ?? 'Leave Management System') . '
+        </div>
+    </div>
+
+    <div class="no-print" style="position: fixed; top: 10px; right: 10px; background: white; padding: 10px; border: 1px solid #ccc; border-radius: 5px; z-index: 1000;">
+        <button onclick="window.print()" style="padding: 8px 15px; background: #007bff; color: white; border: none; border-radius: 3px; cursor: pointer; margin-right: 5px;">
+            <i class="fas fa-print"></i> Print
+        </button>
+        <button onclick="window.close()" style="padding: 8px 15px; background: #6c757d; color: white; border: none; border-radius: 3px; cursor: pointer;">
+            Close
+        </button>
+        <div style="margin-top: 5px; font-size: 10px; color: #666;">
+            PDF Preview - Ready for printing
+        </div>
+    </div>
+</body>
+</html>';
+
+// Output as PDF
+require_once 'vendor/autoload.php';
+
+use Dompdf\Dompdf;
+use Dompdf\Options;
+
+try {
+    $options = new Options();
+    $options->set('isHtml5ParserEnabled', true);
+    $options->set('isRemoteEnabled', true);
+    $options->set('defaultPaperSize', 'A5');
+    $options->set('dpi', 150);
+    $options->set('defaultFont', 'DejaVu Sans');
+
+    $dompdf = new Dompdf($options);
+    $dompdf->loadHtml($html);
+    $dompdf->render();
+
+    // Output the generated PDF for preview
+    $dompdf->stream("leave_application_{$leave_id}.pdf", [
+        'Attachment' => false // false for preview, true for download
+    ]);
+
+} catch (Exception $e) {
+    // Fallback to HTML preview if PDF generation fails
+    echo $html;
+}
+?>
